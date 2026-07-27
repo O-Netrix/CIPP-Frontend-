@@ -1,0 +1,63 @@
+name: Sync Fork with Upstream CIPP
+
+# Automatically pulls new commits from the upstream CyberDrain/CIPP repository
+# into this fork (the same thing as clicking "Sync fork" in the GitHub UI),
+# then kicks off the Azure Static Web Apps deploy so the update goes live.
+#
+# Runs on a daily schedule and can also be run manually from the Actions tab.
+#
+# OPTIONAL BUT RECOMMENDED: add a repository secret named SYNC_PAT containing
+# a fine-grained personal access token for this repository with
+# "Contents: Read and write" and "Workflows: Read and write" permissions.
+# Without it the sync still works, but it will fail on the (rare) occasions
+# that upstream changes files under .github/workflows/, because the default
+# Actions token is not allowed to update workflow files.
+
+on:
+  schedule:
+    - cron: "23 5 * * *" # daily at 05:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    name: Pull upstream changes
+    runs-on: ubuntu-latest
+    env:
+      HAS_SYNC_PAT: ${{ secrets.SYNC_PAT != '' }}
+    steps:
+      - name: Sync default branch with upstream
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.SYNC_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! RESPONSE=$(gh api "repos/${{ github.repository }}/merge-upstream" -f branch="${{ github.ref_name }}" 2>&1); then
+            echo "$RESPONSE"
+            echo "::error::Sync from upstream failed. If the error mentions workflow files or permissions, add a SYNC_PAT repository secret (fine-grained PAT with Contents and Workflows read/write on this repo). If it mentions a merge conflict, sync once manually with GitHub's 'Sync fork' button, then this workflow will take over again."
+            exit 1
+          fi
+          echo "$RESPONSE"
+          MERGE_TYPE=$(echo "$RESPONSE" | jq -r '.merge_type // "none"')
+          if [ "$MERGE_TYPE" = "none" ]; then
+            echo "Already up to date with upstream."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Merged new upstream commits (merge type: $MERGE_TYPE)."
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A push made with the default Actions token does not trigger other
+      # workflows, so the deploy has to be started explicitly. When SYNC_PAT
+      # is configured the push triggers the deploy on its own, so this step
+      # is skipped.
+      - name: Trigger Azure Static Web Apps deploy
+        if: steps.sync.outputs.merged == 'true' && env.HAS_SYNC_PAT != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run azure-static-web-apps-wonderful-mud-0d3695c1e.yml --ref "${{ github.ref_name }}"
